@@ -10,3 +10,10 @@ body { @apply bg-white text-gray-900 antialiased; }
 .btn-danger { @apply border border-red-200 bg-white text-red-600 hover:bg-red-50; }
 .input { @apply w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100; }
 .card { @apply rounded-xl border border-gray-200 bg-white shadow-sm; }
+
+/* One orchestrated moment: the hero conversation types itself in. */
+@media (prefers-reduced-motion: no-preference) {
+  .pop { opacity: 0; transform: translateY(8px) scale(0.96); animation: pop 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; }
+  @keyframes pop { to { opacity: 1; transform: none; } }
+}
+:focus-visible { outline: 3px solid #ffd23f; outline-offset: 2px; }

@@ -7,7 +7,7 @@ const demo: ChatConfig = {
   title: "ChatForm Demo",
   welcome_message: "Hi there! 👋 This is a live demo of a ChatForm chatbot. Want to try it?",
   completion_message: "That's it — in a real form, your answers would now be saved to your dashboard. 🎉",
-  primary_color: "#4f46e5",
+  primary_color: "#2a3fd6",
   questions: [
     { id: "d1", type: "text", label: "What's your name?", required: true, options: [] },
     { id: "d2", type: "email", label: "What's your email address?", required: true, options: [] },

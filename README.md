@@ -20,7 +20,7 @@ git clone <your-repo-url> && cd chatform
 npm install
 cp .env.example .env.local     # then fill in the values
 npm run db:setup               # creates the tables
-npm run dev                    # http://localhost:3000
+npm run dev                    # https://chatform-five.vercel.app/
 ```
 
 ### Environment variables
