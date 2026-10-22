@@ -33,7 +33,7 @@ export default function DemoWidget() {
       </div>
       {open && (
         <div className="absolute inset-x-3 bottom-20 top-16 overflow-hidden rounded-2xl border border-gray-200 shadow-2xl sm:inset-x-auto sm:right-5 sm:top-14 sm:w-[360px]">
-          <ChatBot config={demo} onSubmit={noop} onClose={() => setOpen(false)} restartable />
+          <ChatBot config={demo} onSubmit={noop} onClose={() => setOpen(false)} restartable autoFocus={false} />
         </div>
       )}
       <button

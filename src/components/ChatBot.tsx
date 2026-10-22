@@ -32,11 +32,13 @@ export default function ChatBot({
   onSubmit,
   onClose,
   restartable = false,
+  autoFocus = true,
 }: {
   config: ChatConfig;
   onSubmit: (answers: Record<string, string>) => Promise<string | null>;
   onClose?: () => void;
   restartable?: boolean;
+  autoFocus?: boolean;
 }) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [idx, setIdx] = useState(-1);
@@ -124,8 +126,8 @@ export default function ChatBot({
   }, [msgs, typing, error, done]);
 
   useEffect(() => {
-    if (current && (current.type === "text" || current.type === "email")) inputRef.current?.focus();
-  }, [current]);
+    if (autoFocus && current && (current.type === "text" || current.type === "email")) inputRef.current?.focus({ preventScroll: true });
+  }, [current, autoFocus]);
 
   function answer(value: string) {
     if (!current || sending) return;
