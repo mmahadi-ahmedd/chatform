@@ -2,18 +2,28 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { query } from "@/lib/db";
 import { createSession } from "@/lib/auth";
-import { json, err } from "@/lib/http";
+import { adminEmails } from "@/lib/env";
+import { json, err, route, parseBody, tooMany } from "@/lib/http";
+import { clientIp, rateLimit } from "@/lib/ratelimit";
+import { logActivity } from "@/lib/logger";
 
-const schema = z.object({ email: z.string().email().max(200), password: z.string().min(8).max(100) });
+const schema = z.object({
+  email: z.string().trim().toLowerCase().email("Enter a valid email address.").max(200),
+  password: z.string().min(8, "Password must be at least 8 characters.").max(72, "Password must be at most 72 characters."),
+});
 
-export async function POST(req: Request) {
-  const parsed = schema.safeParse(await req.json().catch(() => null));
-  if (!parsed.success) return err("Enter a valid email and a password of at least 8 characters.");
-  const email = parsed.data.email.toLowerCase();
-  const exists = await query("select 1 from users where email = $1", [email]);
-  if (exists.length) return err("An account with this email already exists.", 409);
-  const hash = await bcrypt.hash(parsed.data.password, 10);
-  const [user] = await query("insert into users (email, password_hash) values ($1, $2) returning id", [email, hash]);
+export const POST = route("auth.signup", async (req) => {
+  const rl = await rateLimit(`signup:${clientIp(req)}`, 5, 3600);
+  if (!rl.ok) return tooMany(rl.retryAfter, "sign-up attempts");
+  const body = await parseBody(req, schema);
+  if ("response" in body) return body.response;
+  const { email, password } = body.data;
+  if (password.toLowerCase() === email) return err("Password can't be the same as your email.");
+  if ((await query("select 1 from users where email = $1", [email])).length) return err("An account with this email already exists.", 409);
+  const hash = await bcrypt.hash(password, 12);
+  const role = adminEmails().includes(email) ? "admin" : "user";
+  const [user] = await query("insert into users (email, password_hash, role, last_login_at) values ($1, $2, $3, now()) returning id", [email, hash, role]);
   await createSession(user.id);
+  await logActivity(user.id, "user.signup", { role });
   return json({ ok: true });
-}
+});

@@ -1,104 +1,71 @@
 import { z } from "zod";
 import { pool, query } from "@/lib/db";
-import { getUser } from "@/lib/auth";
-import { loadForm } from "@/lib/forms";
-import { json, err } from "@/lib/http";
+import { loadOwnedForm, saveQuestions, FormError } from "@/lib/forms";
+import { formSchema, validateForm } from "@/lib/formschema";
+import { guardForm } from "@/lib/guard";
+import { err, json, parseBody, route } from "@/lib/http";
+import { logActivity } from "@/lib/logger";
 
-const uuid = /^[0-9a-f-]{36}$/i;
+type Ctx = { params: { id: string } };
 
-const schema = z.object({
-  title: z.string().trim().min(1, "Title is required").max(150),
-  description: z.string().max(500).default(""),
-  welcome_message: z.string().trim().min(1).max(300),
-  completion_message: z.string().trim().min(1).max(300),
-  primary_color: z.string().regex(/^#[0-9a-fA-F]{6}$/, "Invalid color"),
-  published: z.boolean().optional(),
-  questions: z
-    .array(
-      z.object({
-        type: z.enum(["text", "email", "choice", "yesno"]),
-        label: z.string().trim().min(1, "Every question needs text").max(300),
-        required: z.boolean(),
-        options: z.array(z.string().trim().min(1).max(100)).max(10).default([]),
-      })
-    )
-    .max(50),
+export const GET = route<Ctx>("forms.get", async (_req, { params }) => {
+  const g = await guardForm(params.id);
+  if ("response" in g) return g.response;
+  return json(await loadOwnedForm(params.id, g.user.id));
 });
 
-export async function GET(_: Request, { params }: { params: { id: string } }) {
-  const user = await getUser();
-  if (!user) return err("Unauthorized", 401);
-  if (!uuid.test(params.id)) return err("Not found", 404);
-  const form = await loadForm("id", params.id, user.id);
-  return form ? json(form) : err("Not found", 404);
-}
-
-export async function PUT(req: Request, { params }: { params: { id: string } }) {
-  const user = await getUser();
-  if (!user) return err("Unauthorized", 401);
-  if (!uuid.test(params.id)) return err("Not found", 404);
-  const parsed = schema.safeParse(await req.json().catch(() => null));
-  if (!parsed.success) return err(parsed.error.issues[0]?.message ?? "Invalid data");
-  const d = parsed.data;
-  for (const q of d.questions) {
-    if (q.type === "choice" && q.options.length < 2) return err(`"${q.label}" needs at least 2 options.`);
-  }
+export const PUT = route<Ctx>("forms.update", async (req, { params }) => {
+  const g = await guardForm(params.id);
+  if ("response" in g) return g.response;
+  const body = await parseBody(req, formSchema);
+  if ("response" in body) return body.response;
+  const d = body.data;
+  const problem = validateForm(d.questions);
+  if (problem) return err(problem);
   if (d.published && d.questions.length === 0) return err("Add at least one question before publishing.");
 
   const client = await pool.connect();
   try {
     await client.query("begin");
-    const upd = await client.query(
+    const before = await client.query("select published from forms where id = $1", [params.id]);
+    await client.query(
       `update forms set title=$1, description=$2, welcome_message=$3, completion_message=$4, primary_color=$5,
-         published = coalesce($6, published), updated_at = now()
-       where id=$7 and user_id=$8 returning id`,
-      [d.title, d.description, d.welcome_message, d.completion_message, d.primary_color, d.published ?? null, params.id, user.id]
+         avatar=$6, position=$7, published = coalesce($8, published), updated_at = now()
+       where id=$9 and user_id=$10`,
+      [d.title, d.description, d.welcome_message, d.completion_message, d.primary_color, d.avatar, d.position, d.published ?? null, params.id, g.user.id]
     );
-    if (!upd.rowCount) {
-      await client.query("rollback");
-      return err("Not found", 404);
-    }
-    await client.query("delete from questions where form_id = $1", [params.id]);
-    for (let i = 0; i < d.questions.length; i++) {
-      const q = d.questions[i];
-      await client.query(
-        "insert into questions (form_id, position, type, label, required, options) values ($1,$2,$3,$4,$5,$6)",
-        [params.id, i, q.type, q.label, q.required, JSON.stringify(q.type === "choice" ? q.options : [])]
-      );
-    }
+    await saveQuestions(client, params.id, d.questions);
     await client.query("commit");
+    if (d.published !== undefined && d.published !== before.rows[0].published) await logActivity(g.user.id, d.published ? "form.publish" : "form.unpublish", { id: params.id });
   } catch (e) {
     await client.query("rollback");
-    return err("Could not save the form.", 500);
+    if (e instanceof FormError) return err(e.message);
+    throw e;
   } finally {
     client.release();
   }
-  return json(await loadForm("id", params.id, user.id));
-}
+  return json(await loadOwnedForm(params.id, g.user.id));
+});
 
-export async function PATCH(req: Request, { params }: { params: { id: string } }) {
-  // Quick publish / unpublish from the dashboard
-  const user = await getUser();
-  if (!user) return err("Unauthorized", 401);
-  if (!uuid.test(params.id)) return err("Not found", 404);
-  const body = await req.json().catch(() => null);
-  if (typeof body?.published !== "boolean") return err("published must be true or false");
-  if (body.published) {
+/** Quick publish / unpublish from the dashboard. */
+export const PATCH = route<Ctx>("forms.publish", async (req, { params }) => {
+  const g = await guardForm(params.id);
+  if ("response" in g) return g.response;
+  const body = await parseBody(req, z.object({ published: z.boolean() }));
+  if ("response" in body) return body.response;
+  if (body.data.published) {
     const [c] = await query("select count(*)::int as n from questions where form_id = $1", [params.id]);
     if (!c || c.n === 0) return err("Add at least one question before publishing.");
   }
-  const rows = await query("update forms set published=$1, updated_at=now() where id=$2 and user_id=$3 returning id", [
-    body.published,
-    params.id,
-    user.id,
-  ]);
-  return rows.length ? json({ ok: true }) : err("Not found", 404);
-}
-
-export async function DELETE(_: Request, { params }: { params: { id: string } }) {
-  const user = await getUser();
-  if (!user) return err("Unauthorized", 401);
-  if (!uuid.test(params.id)) return err("Not found", 404);
-  await query("delete from forms where id=$1 and user_id=$2", [params.id, user.id]);
+  await query("update forms set published=$1, updated_at=now() where id=$2 and user_id=$3", [body.data.published, params.id, g.user.id]);
+  await logActivity(g.user.id, body.data.published ? "form.publish" : "form.unpublish", { id: params.id });
   return json({ ok: true });
-}
+});
+
+export const DELETE = route<Ctx>("forms.delete", async (_req, { params }) => {
+  const g = await guardForm(params.id);
+  if ("response" in g) return g.response;
+  await query("delete from forms where id=$1 and user_id=$2", [params.id, g.user.id]);
+  await logActivity(g.user.id, "form.delete", { id: params.id });
+  return json({ ok: true });
+});
