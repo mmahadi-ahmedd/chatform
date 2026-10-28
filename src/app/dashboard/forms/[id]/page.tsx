@@ -1,15 +1,18 @@
 import { redirect, notFound } from "next/navigation";
 import { getUser } from "@/lib/auth";
-import { loadForm } from "@/lib/forms";
-import FormEditor from "@/components/FormEditor";
+import { loadOwnedForm } from "@/lib/forms";
+import { isUuid } from "@/lib/validate";
+import FormEditor, { type Tab } from "@/components/FormEditor";
 
 export const dynamic = "force-dynamic";
+const TABS: Tab[] = ["build", "preview", "responses", "analytics", "integrations", "share"];
 
 export default async function EditPage({ params, searchParams }: { params: { id: string }; searchParams: { tab?: string } }) {
   const user = await getUser();
   if (!user) redirect("/login");
-  if (!/^[0-9a-f-]{36}$/i.test(params.id)) notFound();
-  const form = await loadForm("id", params.id, user.id);
+  if (!isUuid(params.id)) notFound();
+  const form = await loadOwnedForm(params.id, user.id);
   if (!form) notFound();
-  return <FormEditor initial={form} initialTab={searchParams.tab === "responses" ? "responses" : "build"} />;
+  const tab = TABS.find((t) => t === searchParams.tab) ?? "build";
+  return <FormEditor initial={JSON.parse(JSON.stringify(form))} initialTab={tab} />;
 }
