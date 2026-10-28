@@ -1,71 +1,109 @@
 # 💬 ChatForm
 
-Build chat-style forms, embed a floating chatbot widget on any website, collect responses and manage them from a dashboard.
+Build conversational forms, share them as a link, or embed them as a chat widget with one line of code.
+Next.js 14 (App Router) · TypeScript · Tailwind · PostgreSQL.
 
-**Stack:** Next.js 14 (App Router) · React · TypeScript · Tailwind CSS · Next.js API routes · PostgreSQL (works with Supabase) · Git/GitHub
+**Live demo:** https://chatform-five.vercel.app · **Repo:** https://github.com/mmahadi-ahmedd/chatform
 
 ## Features
-- Responsive landing page (hero, features, how it works, live widget demo, footer)
-- Email/password auth (bcrypt + signed httpOnly JWT cookie)
-- Dashboard: total forms / published / responses, create, edit, delete, publish/unpublish
-- Form builder: text, email, multiple choice, yes/no · edit, reorder, delete · required toggle · live chat preview
-- Chatbot widget: one question at a time, buttons for choices, validation (client + server), welcome/completion messages, custom color
-- Public form link: `/f/<slug>` · Embeddable floating widget: one `<script>` tag
-- Responses stored in PostgreSQL with timestamps, viewable in the dashboard
+
+**Form builder** – 8 question types (text, email, multiple choice, dropdown, yes/no, rating, date, file upload) · conditional logic ("show only if…") · 5 starter templates · duplicate forms · live preview · per-question validation (length, regex, rating scale, date range) · custom welcome and success messages · autosave and draft recovery.
+
+**Widget** – floating or inline · colour, avatar, left/right position, welcome message · progress bar · restart · full-screen on mobile · works on any external site.
+
+**Analytics** – views, starts, completions, completion and abandonment rates, per-question stats, daily chart, date filter, CSV export.
+
+**Notifications** – email on each response (Resend) and signed webhooks, with a delivery log, automatic retry and a manual Retry button.
+
+**Dashboard** – search, sort and filter forms and responses; loading, empty, success and error states; keyboard and screen-reader friendly; saved design presets.
+
+**Admin** – platform stats, user search, suspend/reactivate, activity log and error log. Role-based access.
 
 ## Quick start
 
 ```bash
-git clone <your-repo-url> && cd chatform
 npm install
-cp .env.example .env.local     # then fill in the values
-npm run db:setup               # creates the tables
-npm run dev                    # https://chatform-five.vercel.app/
+cp .env.example .env.local      # fill in DATABASE_URL and AUTH_SECRET
+npm run db:setup                # creates / upgrades all tables (safe to re-run)
+npm run dev                     # http://localhost:3000
 ```
 
 ### Environment variables
-| Name | Description |
-|---|---|
-| `DATABASE_URL` | Postgres connection string |
-| `DATABASE_SSL` | `true` for Supabase / hosted Postgres |
-| `AUTH_SECRET` | Long random string (`openssl rand -base64 32`) |
 
-### Using Supabase
-1. Create a project at https://supabase.com
-2. Project Settings → Database → copy the **connection string** (use the *Transaction pooler* URI for Vercel)
-3. Put it in `DATABASE_URL`, set `DATABASE_SSL=true`
-4. Run `npm run db:setup` (or paste `schema.sql` into the Supabase SQL editor)
+| Variable | Required | Purpose |
+|---|---|---|
+| `DATABASE_URL` | yes | Postgres connection string (Supabase: transaction pooler URI) |
+| `DATABASE_SSL` | for hosted DB | `true` for Supabase |
+| `AUTH_SECRET` | yes | signs login cookies (`openssl rand -base64 32`) |
+| `ADMIN_EMAILS` | no | comma-separated emails that become administrators |
+| `RESEND_API_KEY`, `MAIL_FROM` | no | enable email notifications; without a key deliveries show "skipped" |
+| `APP_URL` | no | public URL used in notification emails |
+| `ENCRYPTION_KEY` | no | encrypts webhook secrets (falls back to a key derived from `AUTH_SECRET`) |
+| `ALLOW_PRIVATE_WEBHOOKS` | tests only | **never** set in production; disables the SSRF guard |
+
+### Upgrading an existing database
+Run `npm run db:setup` once against the production database. It is idempotent and keeps all Task 1 data.
+
+### Creating an admin
+Either set `ADMIN_EMAILS=you@example.com` (promoted at next login) or run `npm run make-admin -- you@example.com`. Admin pages are at `/admin`.
 
 ## Deploy to Vercel
-1. Push the repo to GitHub, import it at https://vercel.com/new
-2. Add the three environment variables above
-3. Deploy. Make sure the schema has been created in your database (`npm run db:setup` locally with the production `DATABASE_URL`)
+Add the env vars above in Project → Settings → Environment Variables, run `npm run db:setup` against Supabase, then redeploy.
 
-## How to use
-1. Sign up → **New form** → add questions → **Save & publish**
-2. Open the **Share & embed** tab: copy the public link or the snippet
-3. Paste the snippet before `</body>` on any website:
-   ```html
-   <script src="https://YOUR-APP-URL/embed.js" data-form="FORM_SLUG" async></script>
-   ```
-   Optional attributes: `data-position="left"`, `data-color="#ff6600"` (fallback color).
-4. Answers appear in the form's **Responses** tab.
+## Embedding
+
+```html
+<script src="https://chatform-five.vercel.app/embed.js" data-form="YOUR_SLUG" async></script>
+```
+
+| Attribute | Values | Default |
+|---|---|---|
+| `data-mode` | `floating`, `inline` | `floating` |
+| `data-position` | `left`, `right` | the form's setting |
+| `data-target` | CSS selector (inline mode) | script's position |
+| `data-height` | px (inline mode) | `560` |
+| `data-open` | `true` opens on load | `false` |
+| `data-teaser` | text for the bubble | welcome message |
+
+## Webhooks
+Each POST is JSON (`event: "response.created"`) with headers `X-ChatForm-Event`, `-Delivery`, `-Timestamp`, `-Signature`.
+Verify: `signature === "sha256=" + HMAC_SHA256(secret, timestamp + "." + rawBody)` (hex). The secret (`whsec_…`) is shown once. Reject old timestamps to prevent replays.
+Failed deliveries are retried once automatically; use **Retry** in the Integrations tab for more.
+
+## Security
+- bcrypt (cost 12) passwords; JWT session in an HttpOnly, SameSite=Lax cookie (Secure in production); generic login errors.
+- Every owner endpoint checks ownership in SQL and returns **404** for other people's data.
+- Admin pages return 404 for non-admins; admins can't suspend themselves or other admins; suspended users are signed out immediately.
+- Server-side validation (zod + per-question rules, hidden-question answers discarded, ReDoS-safe patterns).
+- Rate limits (Postgres-backed): signup, login (per IP and per account), submissions, uploads, events.
+- Spam: honeypot field, duplicate-submission blocking, hashed IPs.
+- CSRF origin checks, security headers, framing allowed only for the widget page.
+- Webhooks: HTTPS only, no credentials in URL, private/loopback IPs blocked, redirects not followed, 5 s timeout, secrets AES-256-GCM encrypted.
+- Uploads: 2 MB, type allow-list + magic-byte check, owner-only download as attachment.
+- CSV export guards against spreadsheet formula injection.
+
+## Tests
+
+```bash
+npm test                # 39 unit tests
+npm run build && npm run test:integration   # 49 integration tests (needs a local Postgres + DATABASE_URL)
+npm run test:all
+```
+Integration tests boot the production build, mock webhook/email servers, and cover auth, RBAC, cross-user isolation, validation, logic, uploads, analytics, CSV, integrations, admin and embedding. See `TEST_RESULTS.md`.
 
 ## Project structure
 ```
-schema.sql                 database tables
-scripts/setup-db.mjs       applies schema.sql
-public/embed.js            the embeddable widget loader (floating button + iframe)
-src/app/                   pages: landing, login, signup, dashboard, /f/[slug], /widget/[slug]
-src/app/api/               auth, forms CRUD, public form + response submission
-src/components/            ChatBot (chat UI), FormEditor, Dashboard, ...
-src/lib/                   db, auth, validation (shared by browser and server)
+src/app            pages and API routes (api/forms, api/public, api/admin …)
+src/components     ChatBot, FormEditor (+ editor/ tabs), Dashboard, admin UI
+src/lib            auth, validation, logic, analytics, deliver, ratelimit, crypto …
+public/embed.js    the embeddable widget loader
+schema.sql         tables + idempotent upgrades
+scripts/           setup-db, make-admin, test-integration
+tests/             unit/ and integration/
 ```
 
-## How the widget works
-`embed.js` adds a floating button and an iframe pointing to `/widget/<slug>` on your app, so styles never clash with the host website. On phones (≤480px) the chat opens full screen.
-
-## Notes / limitations (MVP)
-- Editing a form replaces its questions; older responses keep a snapshot of the question text.
-- No rate limiting on public submissions yet (add one before heavy production use).
-- No email verification or password reset.
+## Limitations
+- Email needs a Resend API key (no key → logged as skipped).
+- Uploads are stored in Postgres (2 MB cap) and Vercel limits request bodies to 4.5 MB; use object storage for heavier use.
+- Rate limits fail open if the database is unreachable, so the form keeps working.
+- Analytics days are UTC.
