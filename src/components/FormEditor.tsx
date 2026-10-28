@@ -1,346 +1,222 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import ChatBot from "./ChatBot";
-import { TYPE_LABELS, type AnswerItem, type FormData, type QuestionType } from "@/lib/types";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api } from "@/lib/client";
+import { validateForm } from "@/lib/formschema";
+import { TYPE_LABELS, type FormData, type QuestionType } from "@/lib/types";
+import { uuid } from "@/lib/uuid";
+import { useToasts } from "./Toasts";
+import AnalyticsTab from "./editor/AnalyticsTab";
+import DesignPanel from "./editor/DesignPanel";
+import IntegrationsTab from "./editor/IntegrationsTab";
+import PreviewTab from "./editor/PreviewTab";
+import QuestionCard from "./editor/QuestionCard";
+import ResponsesTab from "./editor/ResponsesTab";
+import ShareTab from "./editor/ShareTab";
+import { fromForm, hasOptions, normalizeLogic, snapshot, toPayload, type Draft, type EditQ } from "./editor/model";
 
-interface EditQ {
-  key: string;
-  type: QuestionType;
-  label: string;
-  required: boolean;
-  optionsText: string;
-}
-
-let counter = 0;
-const newKey = () => `k${Date.now()}_${counter++}`;
-const toOptions = (t: string) => t.split("\n").map((s) => s.trim()).filter(Boolean);
-
-function toEdit(f: FormData): EditQ[] {
-  return f.questions.map((q) => ({ key: q.id, type: q.type, label: q.label, required: q.required, optionsText: q.options.join("\n") }));
-}
-
-type Tab = "build" | "preview" | "responses" | "share";
+export type Tab = "build" | "preview" | "responses" | "analytics" | "integrations" | "share";
+const TABS: [Tab, string][] = [["build", "Build"], ["preview", "Preview"], ["responses", "Responses"], ["analytics", "Analytics"], ["integrations", "Integrations"], ["share", "Share & embed"]];
+const AUTOSAVE_MS = 2500;
 
 export default function FormEditor({ initial, initialTab }: { initial: FormData; initialTab: Tab }) {
-  const [tab, setTab] = useState<Tab>(initialTab);
-  const [title, setTitle] = useState(initial.title);
-  const [description, setDescription] = useState(initial.description);
-  const [welcome, setWelcome] = useState(initial.welcome_message);
-  const [completion, setCompletion] = useState(initial.completion_message);
-  const [color, setColor] = useState(initial.primary_color);
-  const [questions, setQuestions] = useState<EditQ[]>(toEdit(initial));
+  const router = useRouter();
+  const { push, node } = useToasts();
+  const [tab, setTabState] = useState<Tab>(initialTab);
+  const [d, setD] = useState<Draft>(() => fromForm(initial));
   const [published, setPublished] = useState(initial.published);
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const saved = useRef(snapshot(fromForm(initial)));
+  const basedOn = useRef(initial.updated_at ?? "");
+  const [status, setStatus] = useState<{ kind: "idle" | "saving" | "saved" | "paused" | "error"; text: string }>({ kind: "idle", text: "" });
+  const [recover, setRecover] = useState<{ draft: Draft; at: number } | null>(null);
+  const saving = useRef(false);
 
-  const touch = <T,>(setter: (v: T) => void) => (v: T) => {
-    setter(v);
-    setDirty(true);
-    setMsg(null);
-  };
+  const dirty = snapshot(d) !== saved.current;
+  const storageKey = `chatform:draft:${initial.id}`;
 
-  const updateQ = (key: string, patch: Partial<EditQ>) => {
-    setQuestions((qs) => qs.map((q) => (q.key === key ? { ...q, ...patch } : q)));
-    setDirty(true);
-    setMsg(null);
-  };
-  const addQ = (type: QuestionType) => {
-    setQuestions((qs) => [
-      ...qs,
-      { key: newKey(), type, label: "", required: true, optionsText: type === "choice" ? "Option 1\nOption 2" : "" },
-    ]);
-    setDirty(true);
-  };
-  const removeQ = (key: string) => {
-    setQuestions((qs) => qs.filter((q) => q.key !== key));
-    setDirty(true);
-  };
+  // ---- draft recovery: offer to restore unsaved edits from a previous session ----
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return;
+      const s = JSON.parse(raw) as { data: Draft; based_on: string; at: number };
+      if (s.based_on === basedOn.current && snapshot(s.data) !== saved.current) setRecover({ draft: s.data, at: s.at });
+      else localStorage.removeItem(storageKey);
+    } catch { /* storage unavailable or corrupt: ignore */ }
+  }, [storageKey]);
+
+  // ---- keep a local copy of unsaved edits (survives refresh / crash / lost connection) ----
+  useEffect(() => {
+    if (recover) return;
+    const t = setTimeout(() => {
+      try {
+        if (snapshot(d) !== saved.current) localStorage.setItem(storageKey, JSON.stringify({ data: d, based_on: basedOn.current, at: Date.now() }));
+        else localStorage.removeItem(storageKey);
+      } catch { /* ignore */ }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [d, recover, storageKey]);
+
+  useEffect(() => {
+    const warn = (e: BeforeUnloadEvent) => { if (snapshot(d) !== saved.current) { e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [d]);
+
+  const set = useCallback(<K extends keyof Draft>(k: K, v: Draft[K]) => setD((x) => ({ ...x, [k]: v })), []);
+
+  const setQuestions = useCallback((next: EditQ[]) => {
+    const { questions, cleared } = normalizeLogic(next);
+    setD((x) => ({ ...x, questions }));
+    if (cleared.length) push("error", `Removed the condition on "${cleared[0]}": it must depend on an earlier question.`);
+  }, [push]);
+
+  const updateQ = (id: string, patch: Partial<EditQ>) => setQuestions(d.questions.map((q) => (q.id === id ? { ...q, ...patch } : q)));
+  const addQ = (type: QuestionType) =>
+    setQuestions([...d.questions, { id: uuid(), type, label: "", required: true, optionsText: hasOptions(type) ? "Option 1\nOption 2" : "", config: type === "rating" ? { max: 5 } : {}, logic: null }]);
   const move = (i: number, dir: -1 | 1) => {
-    setQuestions((qs) => {
-      const j = i + dir;
-      if (j < 0 || j >= qs.length) return qs;
-      const copy = [...qs];
-      [copy[i], copy[j]] = [copy[j], copy[i]];
-      return copy;
-    });
-    setDirty(true);
+    const j = i + dir;
+    if (j < 0 || j >= d.questions.length) return;
+    const copy = [...d.questions];
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+    setQuestions(copy);
   };
+
+  /** Returns an error message if the draft can't be saved yet. */
+  function problem(draft: Draft): string | null {
+    const payload = toPayload(draft);
+    for (const [i, q] of payload.questions.entries()) if (!q.label.trim()) return `Question ${i + 1} is empty. Add some text or delete it.`;
+    if (!draft.title.trim()) return "The form needs a title.";
+    for (const [i, q] of draft.questions.entries()) if (q.logic && !q.logic.value) return `Question ${i + 1}: choose a value for its condition.`;
+    return validateForm(payload.questions as never);
+  }
 
   const save = useCallback(
-    async (nextPublished?: boolean) => {
-      setMsg(null);
-      for (const [i, q] of questions.entries()) {
-        if (!q.label.trim()) return setMsg({ kind: "error", text: `Question ${i + 1} is empty. Add some text or delete it.` });
-        if (q.type === "choice" && toOptions(q.optionsText).length < 2)
-          return setMsg({ kind: "error", text: `Question ${i + 1} needs at least 2 options (one per line).` });
+    async (opts: { publish?: boolean; auto?: boolean } = {}) => {
+      if (saving.current) return;
+      const sent = d;
+      const bad = problem(sent);
+      if (bad) {
+        if (opts.auto) setStatus({ kind: "paused", text: `Autosave paused: ${bad}` });
+        else { setStatus({ kind: "error", text: bad }); push("error", bad); }
+        return;
       }
-      setSaving(true);
-      const res = await fetch(`/api/forms/${initial.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          description,
-          welcome_message: welcome,
-          completion_message: completion,
-          primary_color: color,
-          published: nextPublished ?? published,
-          questions: questions.map((q) => ({
-            type: q.type,
-            label: q.label,
-            required: q.required,
-            options: q.type === "choice" ? toOptions(q.optionsText) : [],
-          })),
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      setSaving(false);
-      if (!res.ok) return setMsg({ kind: "error", text: data.error || "Could not save" });
-      setQuestions(toEdit(data));
-      setPublished(data.published);
-      setDirty(false);
-      setMsg({ kind: "ok", text: nextPublished === undefined ? "Saved ✓" : data.published ? "Published ✓" : "Unpublished ✓" });
+      saving.current = true;
+      setStatus({ kind: "saving", text: "Saving…" });
+      const r = await api<FormData>(`/api/forms/${initial.id}`, { method: "PUT", json: toPayload(sent, opts.publish) });
+      saving.current = false;
+      if (!r.ok) {
+        setStatus({ kind: "error", text: r.error! });
+        if (!opts.auto) push("error", r.error!);
+        return;
+      }
+      saved.current = snapshot(sent);
+      basedOn.current = r.data.updated_at ?? "";
+      setPublished(r.data.published);
+      try { localStorage.removeItem(storageKey); } catch { /* ignore */ }
+      setStatus({ kind: "saved", text: `All changes saved at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` });
+      if (opts.publish !== undefined) push("success", r.data.published ? "Form published" : "Form unpublished");
+      else if (!opts.auto) push("success", "Saved");
+      router.refresh();
     },
-    [questions, title, description, welcome, completion, color, published, initial.id]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [d, initial.id, storageKey, push]
   );
 
-  const previewConfig = useMemo(
-    () => ({
-      title: title || "Untitled form",
-      welcome_message: welcome,
-      completion_message: completion,
-      primary_color: color,
-      questions: questions.map((q) => ({
-        id: q.key,
-        type: q.type,
-        label: q.label || "(empty question)",
-        required: q.required,
-        options: toOptions(q.optionsText),
-      })),
-    }),
-    [title, welcome, completion, color, questions]
-  );
-  const previewSubmit = useCallback(async () => null, []);
+  // ---- autosave: drafts only. Published forms are live, so they need an explicit Save. ----
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => {
+    if (!dirty || published || recover) return;
+    setStatus((s) => (s.kind === "paused" || s.kind === "error" ? s : { kind: "idle", text: "Unsaved changes" }));
+    const t = setTimeout(() => saveRef.current({ auto: true }), AUTOSAVE_MS);
+    return () => clearTimeout(t);
+  }, [d, dirty, published, recover]);
 
-  const tabs: [Tab, string][] = [["build", "Build"], ["preview", "Preview"], ["responses", "Responses"], ["share", "Share & embed"]];
+  async function duplicate() {
+    const r = await api<{ id: string }>(`/api/forms/${initial.id}/duplicate`, { method: "POST" });
+    if (r.ok) { push("success", "Form duplicated"); router.push(`/dashboard/forms/${r.data.id}`); } else push("error", r.error!);
+  }
+
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    window.history.replaceState(null, "", `?tab=${t}`);
+  };
+
+  const statusText = useMemo(() => {
+    if (status.kind === "saving") return "Saving…";
+    if (dirty) return published ? "Unsaved changes (published forms save only when you click Save)" : status.kind === "paused" || status.kind === "error" ? status.text : "Unsaved changes";
+    return status.kind === "saved" ? status.text : "";
+  }, [status, dirty, published]);
 
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="sticky top-0 z-10 border-b border-gray-200 bg-white">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-3 px-4 py-3">
           <Link href="/dashboard" className="text-sm text-gray-600 hover:text-indigo-600">← Dashboard</Link>
-          <span className="min-w-0 flex-1 truncate font-semibold">{title || "Untitled form"}</span>
-          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${published ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>
-            {published ? "Published" : "Draft"}
-          </span>
-          <button onClick={() => save()} disabled={saving || !dirty} className="btn btn-ghost">{saving ? "Saving…" : "Save"}</button>
-          <button onClick={() => save(!published)} disabled={saving} className="btn btn-primary">{published ? "Unpublish" : "Save & publish"}</button>
+          <span className="min-w-0 flex-1 truncate font-semibold">{d.title || "Untitled form"}</span>
+          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${published ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>{published ? "Published" : "Draft"}</span>
+          <button onClick={duplicate} className="btn btn-ghost">Duplicate</button>
+          <button onClick={() => save()} disabled={status.kind === "saving" || !dirty} className="btn btn-ghost">Save</button>
+          <button onClick={() => save({ publish: !published })} disabled={status.kind === "saving"} className="btn btn-primary">{published ? "Unpublish" : "Save & publish"}</button>
         </div>
-        <nav className="mx-auto flex max-w-5xl gap-1 overflow-x-auto px-4">
-          {tabs.map(([t, label]) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium ${tab === t ? "border-indigo-600 text-indigo-600" : "border-transparent text-gray-500 hover:text-gray-800"}`}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4">
+          <div role="tablist" aria-label="Form sections" className="flex gap-1 overflow-x-auto">
+            {TABS.map(([t, label]) => (
+              <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium ${tab === t ? "border-indigo-600 text-indigo-600" : "border-transparent text-gray-500 hover:text-gray-800"}`}>{label}</button>
+            ))}
+          </div>
+          <span className={`hidden shrink-0 text-xs md:inline ${status.kind === "error" || status.kind === "paused" ? "text-amber-700" : "text-gray-500"}`} role="status" aria-live="polite">{statusText}</span>
+        </div>
       </header>
 
       <main className="mx-auto max-w-5xl px-4 py-6">
-        {msg && (
-          <p role="status" className={`mb-4 rounded-lg px-3 py-2 text-sm ${msg.kind === "ok" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>
-            {msg.text}
-          </p>
+        {recover && (
+          <div role="alertdialog" aria-label="Recover unsaved draft" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm">
+            <span>We found unsaved changes from {new Date(recover.at).toLocaleString()}. Restore them?</span>
+            <span className="flex gap-2">
+              <button className="btn btn-primary" onClick={() => { setD(recover.draft); setRecover(null); }}>Restore draft</button>
+              <button className="btn btn-ghost" onClick={() => { try { localStorage.removeItem(storageKey); } catch { /* ignore */ } setRecover(null); }}>Discard</button>
+            </span>
+          </div>
         )}
-        {dirty && <p className="mb-4 text-xs text-amber-600">You have unsaved changes.</p>}
+        <p className="mb-3 text-xs md:hidden" role="status">{statusText}</p>
 
         {tab === "build" && (
-          <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
-            <section className="space-y-4">
+          <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
+            <section className="space-y-4" aria-label="Questions">
               <div className="card space-y-3 p-4">
-                <Field label="Form title"><input className="input" value={title} maxLength={150} onChange={(e) => touch(setTitle)(e.target.value)} /></Field>
-                <Field label="Description (optional)"><textarea className="input" rows={2} maxLength={500} value={description} onChange={(e) => touch(setDescription)(e.target.value)} /></Field>
+                <label className="block"><span className="mb-1 block text-sm font-medium">Form title</span><input className="input" maxLength={150} value={d.title} onChange={(e) => set("title", e.target.value)} /></label>
+                <label className="block"><span className="mb-1 block text-sm font-medium">Description (optional, for your reference)</span><textarea className="input" rows={2} maxLength={500} value={d.description} onChange={(e) => set("description", e.target.value)} /></label>
               </div>
 
-              {questions.length === 0 && <div className="card p-6 text-center text-sm text-gray-500">No questions yet. Add one below.</div>}
-
-              {questions.map((q, i) => (
-                <div key={q.key} className="card space-y-3 p-4">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-700">{i + 1}</span>
-                    <select
-                      aria-label="Question type"
-                      className="input !w-auto"
-                      value={q.type}
-                      onChange={(e) => {
-                        const type = e.target.value as QuestionType;
-                        updateQ(q.key, { type, optionsText: type === "choice" && !q.optionsText ? "Option 1\nOption 2" : q.optionsText });
-                      }}
-                    >
-                      {(Object.keys(TYPE_LABELS) as QuestionType[]).map((t) => <option key={t} value={t}>{TYPE_LABELS[t]}</option>)}
-                    </select>
-                    <div className="ml-auto flex gap-1">
-                      <button className="btn btn-ghost !px-2.5" onClick={() => move(i, -1)} disabled={i === 0} aria-label="Move up">↑</button>
-                      <button className="btn btn-ghost !px-2.5" onClick={() => move(i, 1)} disabled={i === questions.length - 1} aria-label="Move down">↓</button>
-                      <button className="btn btn-danger !px-2.5" onClick={() => removeQ(q.key)} aria-label="Delete question">🗑</button>
-                    </div>
-                  </div>
-                  <input className="input" placeholder="Type your question…" maxLength={300} value={q.label} onChange={(e) => updateQ(q.key, { label: e.target.value })} />
-                  {q.type === "choice" && (
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-gray-600">Options (one per line, max 10)</label>
-                      <textarea className="input" rows={3} value={q.optionsText} onChange={(e) => updateQ(q.key, { optionsText: e.target.value })} />
-                    </div>
-                  )}
-                  <label className="flex items-center gap-2 text-sm">
-                    <input type="checkbox" checked={q.required} onChange={(e) => updateQ(q.key, { required: e.target.checked })} className="h-4 w-4 accent-indigo-600" />
-                    Required
-                  </label>
-                </div>
+              {d.questions.length === 0 && <div className="card p-6 text-center text-sm text-gray-500">No questions yet. Add one below.</div>}
+              {d.questions.map((q, i) => (
+                <QuestionCard key={q.id} q={q} index={i} all={d.questions} onChange={(p) => updateQ(q.id, p)} onMove={(dir) => move(i, dir)} onRemove={() => setQuestions(d.questions.filter((x) => x.id !== q.id))} />
               ))}
 
               <div className="card p-4">
                 <p className="mb-2 text-sm font-medium">Add a question</p>
                 <div className="flex flex-wrap gap-2">
-                  {(Object.keys(TYPE_LABELS) as QuestionType[]).map((t) => (
-                    <button key={t} onClick={() => addQ(t)} className="btn btn-ghost">+ {TYPE_LABELS[t]}</button>
-                  ))}
+                  {(Object.keys(TYPE_LABELS) as QuestionType[]).map((t) => <button key={t} onClick={() => addQ(t)} className="btn btn-ghost">+ {TYPE_LABELS[t]}</button>)}
                 </div>
               </div>
             </section>
-
-            <aside className="space-y-4">
-              <div className="card space-y-3 p-4">
-                <h2 className="font-semibold">Chatbot appearance</h2>
-                <Field label="Welcome message"><textarea className="input" rows={3} maxLength={300} value={welcome} onChange={(e) => touch(setWelcome)(e.target.value)} /></Field>
-                <Field label="Completion message"><textarea className="input" rows={3} maxLength={300} value={completion} onChange={(e) => touch(setCompletion)(e.target.value)} /></Field>
-                <Field label="Brand color">
-                  <div className="flex items-center gap-2">
-                    <input type="color" value={color} onChange={(e) => touch(setColor)(e.target.value)} className="h-9 w-12 cursor-pointer rounded border border-gray-300" aria-label="Brand color" />
-                    <code className="text-xs text-gray-500">{color}</code>
-                  </div>
-                </Field>
-              </div>
+            <aside className="space-y-4 lg:sticky lg:top-28 lg:self-start">
+              <DesignPanel d={d} set={set} push={push} />
               <button className="btn btn-ghost w-full" onClick={() => setTab("preview")}>👁 Preview chatbot</button>
             </aside>
           </div>
         )}
-
-        {tab === "preview" && (
-          <div className="mx-auto max-w-sm">
-            <p className="mb-3 text-center text-sm text-gray-500">Preview only — answers here are not saved. Reflects your unsaved edits.</p>
-            <div className="h-[600px] overflow-hidden rounded-2xl border border-gray-200 shadow-lg">
-              <ChatBot config={previewConfig} onSubmit={previewSubmit} restartable />
-            </div>
-          </div>
-        )}
-
-        {tab === "responses" && <Responses formId={initial.id} />}
-        {tab === "share" && <Share slug={initial.slug} published={published} dirty={dirty} />}
+        {tab === "preview" && <PreviewTab d={d} />}
+        {tab === "responses" && <ResponsesTab formId={initial.id} push={push} />}
+        {tab === "analytics" && <AnalyticsTab formId={initial.id} />}
+        {tab === "integrations" && <IntegrationsTab formId={initial.id} push={push} />}
+        {tab === "share" && <ShareTab slug={initial.slug} published={published} dirty={dirty} />}
       </main>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <span className="mb-1 block text-sm font-medium">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function Responses({ formId }: { formId: string }) {
-  const [rows, setRows] = useState<{ id: string; answers: AnswerItem[]; submitted_at: string }[] | null>(null);
-  const [error, setError] = useState("");
-
-  const load = useCallback(async () => {
-    setError("");
-    const res = await fetch(`/api/forms/${formId}/responses`);
-    if (res.ok) setRows(await res.json());
-    else setError("Could not load responses");
-  }, [formId]);
-  useEffect(() => { load(); }, [load]);
-
-  if (error) return <p className="text-sm text-red-600">{error}</p>;
-  if (!rows) return <p className="text-sm text-gray-500">Loading…</p>;
-  return (
-    <div>
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="font-semibold">{rows.length} submission{rows.length === 1 ? "" : "s"}</h2>
-        <button onClick={load} className="btn btn-ghost">↻ Refresh</button>
-      </div>
-      {rows.length === 0 ? (
-        <div className="card p-10 text-center text-sm text-gray-500">No responses yet. Publish the form and share the link or embed the widget.</div>
-      ) : (
-        <ul className="space-y-3">
-          {rows.map((r, i) => (
-            <li key={r.id} className="card p-4">
-              <div className="mb-2 flex items-center justify-between text-xs text-gray-500">
-                <span className="font-semibold text-gray-700">#{rows.length - i}</span>
-                <time dateTime={r.submitted_at}>{new Date(r.submitted_at).toLocaleString()}</time>
-              </div>
-              <dl className="space-y-2">
-                {r.answers.map((a) => (
-                  <div key={a.question_id}>
-                    <dt className="text-xs font-medium text-gray-500">{a.label}</dt>
-                    <dd className="break-words text-sm">{a.value || <span className="text-gray-400">— skipped —</span>}</dd>
-                  </div>
-                ))}
-              </dl>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function Share({ slug, published, dirty }: { slug: string; published: boolean; dirty: boolean }) {
-  const [origin, setOrigin] = useState("");
-  useEffect(() => setOrigin(window.location.origin), []);
-  const url = `${origin}/f/${slug}`;
-  const snippet = `<script src="${origin}/embed.js" data-form="${slug}" async></script>`;
-  return (
-    <div className="mx-auto max-w-2xl space-y-4">
-      {!published && <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">This form is a draft. Publish it for the link and widget to work.</p>}
-      {dirty && <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">Unsaved changes won&apos;t appear to visitors until you save.</p>}
-      <div className="card space-y-2 p-4">
-        <h2 className="font-semibold">Public link</h2>
-        <CopyRow text={url} />
-        <a href={url} target="_blank" rel="noreferrer" className="text-sm text-indigo-600 hover:underline">Open in new tab ↗</a>
-      </div>
-      <div className="card space-y-2 p-4">
-        <h2 className="font-semibold">Embed the chatbot widget</h2>
-        <p className="text-sm text-gray-600">Paste this snippet just before the closing <code>&lt;/body&gt;</code> tag of any website.</p>
-        <CopyRow text={snippet} multiline />
-      </div>
-    </div>
-  );
-}
-
-function CopyRow({ text, multiline }: { text: string; multiline?: boolean }) {
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard blocked: user can select manually */
-    }
-  }
-  return (
-    <div className="flex items-start gap-2">
-      <code className={`flex-1 rounded-lg bg-gray-100 px-3 py-2 text-xs ${multiline ? "break-all" : "truncate"}`}>{text}</code>
-      <button onClick={copy} className="btn btn-ghost shrink-0">{copied ? "Copied ✓" : "Copy"}</button>
+      {node}
     </div>
   );
 }
