@@ -1,11 +1,11 @@
-import { loadForm } from "@/lib/forms";
+import { loadPublicForm } from "@/lib/forms";
 import PublicChat from "@/components/PublicChat";
 
 export const dynamic = "force-dynamic";
 
 export default async function PublicFormPage({ params }: { params: { slug: string } }) {
-  const form = await loadForm("slug", params.slug);
-  if (!form || !form.published) {
+  const form = await loadPublicForm(params.slug);
+  if (!form) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-50 p-6 text-center">
         <div>

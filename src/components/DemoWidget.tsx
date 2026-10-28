@@ -5,14 +5,16 @@ import ChatBot, { type ChatConfig } from "./ChatBot";
 
 const demo: ChatConfig = {
   title: "ChatForm Demo",
-  welcome_message: "Hi there! 👋 This is a live demo of a ChatForm chatbot. Want to try it?",
-  completion_message: "That's it — in a real form, your answers would now be saved to your dashboard. 🎉",
+  welcome_message: "Hi there! This is a live demo of a ChatForm chatbot. Want to try it?",
+  completion_message: "That's it. In a real form, your answers would now be saved to your dashboard.",
   primary_color: "#2a3fd6",
+  avatar: "💬",
   questions: [
-    { id: "d1", type: "text", label: "What's your name?", required: true, options: [] },
-    { id: "d2", type: "email", label: "What's your email address?", required: true, options: [] },
-    { id: "d3", type: "choice", label: "What would you use ChatForm for?", required: true, options: ["Lead capture", "Feedback", "Support", "Surveys"] },
-    { id: "d4", type: "yesno", label: "Would you like to hear about updates?", required: false, options: [] },
+    { id: "d1", type: "text", label: "What's your name?", required: true, options: [], config: {}, logic: null },
+    { id: "d2", type: "email", label: "What's your email address?", required: true, options: [], config: {}, logic: null },
+    { id: "d3", type: "dropdown", label: "What would you use ChatForm for?", required: true, options: ["Lead capture", "Feedback", "Support", "Surveys"], config: {}, logic: null },
+    { id: "d4", type: "rating", label: "How easy does this look so far?", required: true, options: [], config: { max: 5 }, logic: null },
+    { id: "d5", type: "text", label: "Sorry to hear that. What would make it better?", required: false, options: [], config: {}, logic: { question_id: "d4", op: "lte", value: "3" } },
   ],
 };
 const noop = async () => null;
@@ -33,7 +35,7 @@ export default function DemoWidget() {
       </div>
       {open && (
         <div className="absolute inset-x-3 bottom-20 top-16 overflow-hidden rounded-2xl border border-gray-200 shadow-2xl sm:inset-x-auto sm:right-5 sm:top-14 sm:w-[360px]">
-          <ChatBot config={demo} onSubmit={noop} onClose={() => setOpen(false)} restartable autoFocus={false} />
+          <ChatBot config={demo} onSubmit={noop} onClose={() => setOpen(false)} autoFocus={false} />
         </div>
       )}
       <button
